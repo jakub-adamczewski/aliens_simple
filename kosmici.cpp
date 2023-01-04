@@ -58,7 +58,7 @@ struct packet {
 bool operator==(const packet &a, const packet &b) {
     return a.clock == b.clock &&
            a.alienId == b.alienId &&
-           a.hotelId == b.hotelId &&
+           a.hotelId == b.hotelId;
 }
 
 struct past_request {
@@ -66,7 +66,7 @@ struct past_request {
     bool leftHotel;
 };
 
-#define debug(FORMAT, ...) printf("\033[c:%d][r:%d][%c][%s][%s]: " FORMAT "\033[0m\n", this->clock, this->rank, (this->alienType == PURPLE ? 'P' : 'B'), toString(this->processStatus),printTime(), ##__VA_ARGS__);
+#define debug(FORMAT, ...) printf("\033 |c:%d|r:%d|f:%c|s:%s|t:%s|msg:" FORMAT "|\n", this->clock, this->rank, (this->alienType == PURPLE ? 'P' : 'B'), toString(this->processStatus),printTime(),##__VA_ARGS__);
 
 char *printTime() {
     time_t rawTime;
@@ -90,41 +90,6 @@ static char *toString(ProcessStatus status) {
     }
 }
 
-static AlienType getAlienType(int alienId) {
-    assert(alienId >= FIRST_ID && alienId <= LAST_ID);
-    if (alienId >= PURPLES_FIRST_ID && alienId <= PURPLES_LAST_ID) {
-        return PURPLE;
-    } else if (alienId >= BLUES_FIRST_ID && alienId <= BLUES_LAST_ID) {
-        return BLUE;
-    }
-}
-
-static AlienType getOtherFraction(AlienType tp) {
-    switch (tp) {
-        case PURPLE:
-            return BLUE;
-        case BLUE:
-            return PURPLE;
-    }
-}
-
-static int getFractionCount(AlienType tp) {
-    switch (tp) {
-        case PURPLE:
-            return PURPLES_COUNT;
-        case BLUE:
-            return BLUES_COUNT;
-    }
-}
-
-static int randInt(int _min, int _max) {
-    return _min + (rand() % (_max - _min));
-}
-
-static int getRandomHotelId() {
-    return randInt(0, HOTELS_NUMBER + 1);
-}
-
 class Entity {
 public:
     int clock;
@@ -139,6 +104,8 @@ public:
         this->clock = c;
         this->clock_mutex = m;
         this->rank = r;
+
+        srand(time(nullptr) + this->rank);
     }
 
     int incrementAndGetClock() {
@@ -188,16 +155,50 @@ public:
 
 class Alien : public Entity {
 
-    AlienType alienType = getAlienType(rank);
+    AlienType alienType = Alien::getAlienType(rank);
     std::condition_variable enterHotelCond;
     std::mutex canEnterPickedHotel;
     pthread_mutex_t msgVectorsMutex = PTHREAD_MUTEX_INITIALIZER;
-    std::vector<struct past_request> hotelRequests; // Moze dojsc do sytuacji ze ktos wyjdzie z hotelu w trakcie jak my do niego czekamy.
+    std::vector<struct past_request> hotelRequests;
     std::vector<struct packet> hotelResponses;
     ProcessStatus processStatus = NO_HOTEL;
     bool notPickedAnyHotelYet = true;
 
     struct packet myHotelRequest;
+
+    static AlienType getAlienType(int alienId) {
+        if (alienId >= PURPLES_FIRST_ID && alienId <= PURPLES_LAST_ID) {
+            return PURPLE;
+        } else if (alienId >= BLUES_FIRST_ID && alienId <= BLUES_LAST_ID) {
+            return BLUE;
+        }
+    }
+
+    static AlienType getOtherFraction(AlienType tp) {
+        switch (tp) {
+            case PURPLE:
+                return BLUE;
+            case BLUE:
+                return PURPLE;
+        }
+    }
+
+    static int getFractionCount(AlienType tp) {
+        switch (tp) {
+            case PURPLE:
+                return PURPLES_COUNT;
+            case BLUE:
+                return BLUES_COUNT;
+        }
+    }
+
+    int randIntInclusive(int _min, int _max) {
+        return _min + (rand() % (_max - _min + 1));
+    }
+
+    int getRandomHotelId() {
+        return randIntInclusive(0, HOTELS_NUMBER - 1);
+    }
 
     void sendHotelRequest(int pickedHotelId) {
         int clk = this->incrementAndGetClock();
@@ -213,36 +214,37 @@ class Alien : public Entity {
         processStatus = WAITING_TO_ENTER_HOTEL;
         notPickedAnyHotelYet = false;
 
-        debug("Sent hotel requests for hotel %d.", pickedHotelId);
+        debug("Sent requests for hotel %d.", pickedHotelId);
     }
 
     void sendHotelResponse(int alienTo) {
         struct packet msg =
                 {
-                        getClock(),
+                        incrementAndGetClock(),
                         this->rank
                 };
         MPI_Send(&msg, sizeof(msg), MPI_BYTE, alienTo, HOTEL_REQUEST_RESP, MPI_COMM_WORLD);
     }
 
     void enterHotelForRandomTime() {
-        debug("Entered hotel %d", myHotelRequest.hotelId)
         processStatus = IN_HOTEL;
+        debug("E%d.marker", myHotelRequest.hotelId) // entered hotel %d
         this->randomSleep();
 
         processStatus = NO_HOTEL;
-        struct packet emptyMsg = {
-                NULL, NULL, NULL
-        };
-        myHotelRequest = emptyMsg;
 
         struct packet msg =
                 {
-                        this->getClock(),
+                        this->incrementAndGetClock(),
                         this->rank
                 };
         sendMsgToAllOtherAliens(msg, HOTEL_RELEASE);
-        debug("Left hotel %d and informed others.", myHotelRequest.hotelId);
+
+        debug("L%d.marker", myHotelRequest.hotelId); // left hotel %d
+        struct packet emptyMsg = {
+                -1, -1, -1
+        };
+        myHotelRequest = emptyMsg;
     }
 
     void sendMsgToAllOtherAliens(struct packet msg, MessageType msgType) {
@@ -253,7 +255,7 @@ class Alien : public Entity {
     }
 
     void randomSleep() {
-        int r = randInt(MIN_SLEEP, MAX_SLEEP);
+        int r = randIntInclusive(MIN_SLEEP, MAX_SLEEP);
         debug("sleeping for %d seconds", r);
         Entity::threadSleep(r);
     }
@@ -265,7 +267,7 @@ class Alien : public Entity {
                 std::remove_if(
                         hotelRequests.begin(),
                         hotelRequests.end(),
-                        [](const past_request saved) { return saved.msg.alienId == msg.alienId; }
+                        [msg](const past_request saved) { return saved.msg.alienId == msg.alienId; }
                 ),
                 hotelRequests.end()
         );
@@ -273,7 +275,7 @@ class Alien : public Entity {
                 std::remove_if(
                         hotelResponses.begin(),
                         hotelResponses.end(),
-                        [](const packet saved) { return saved.alientId == msg.alienId; }
+                        [msg](const packet saved) { return saved.alienId == msg.alienId; }
                 ),
                 hotelResponses.end()
         );
@@ -293,7 +295,6 @@ class Alien : public Entity {
                 this->hotelRequests.begin(),
                 this->hotelRequests.end(),
                 [](const struct past_request &a, const struct past_request &b) {
-                    assert(a.msg.clock != b.msg.clock);
                     return a.msg.clock < b.msg.clock;
                 }
         );
@@ -326,9 +327,8 @@ class Alien : public Entity {
         pthread_mutex_lock(&this->msgVectorsMutex);
 
         for (auto pastRequest: hotelRequests) {
-            assert(pastRequest.msg.clock != this->myHotelRequest.clock);
 
-            bool isRequestFromMyFraction = getAlienType(pastRequest.msg.alienId) == this->alienType;
+            bool isRequestFromMyFraction = Alien::getAlienType(pastRequest.msg.alienId) == this->alienType;
             bool isRequestOlderThanMine = pastRequest.msg.clock < this->myHotelRequest.clock;
             bool isRequestForSameHotel = pastRequest.msg.hotelId == myHotelRequest.hotelId;
             bool isAlienStillInHotel = !pastRequest.leftHotel;
@@ -349,7 +349,7 @@ class Alien : public Entity {
         }
 
         for (auto response: hotelResponses) {
-            bool isRequestFromMyFraction = getAlienType(response.alienId) == this->alienType;
+            bool isRequestFromMyFraction = Alien::getAlienType(response.alienId) == this->alienType;
             if (isRequestFromMyFraction) {
                 myFractionAliensBehindMeOrNotToMyHotel++;
             } else {
@@ -363,7 +363,7 @@ class Alien : public Entity {
         bool noOtherFractionAliensInFrontOfMe = otherFractionAliensInFrontOfMe == 0;
         bool weHaveInfoAboutAllOtherFractionAliens =
                 (otherFractionAliensInFrontOfMe + otherFractionAliensBehindMeOrNotToMyHotel) ==
-                getFractionCount(getOtherFraction(alienType));
+                Alien::getFractionCount(Alien::getOtherFraction(alienType));
         bool isAnyPlaceForMeInHotel = myFractionAliensInFrontOfMe + 1 <= HOTEL_CAPACITIES[myHotelRequest.hotelId];
 
         bool canEnter = noOtherFractionAliensInFrontOfMe &&
@@ -378,7 +378,6 @@ class Alien : public Entity {
 
 public:
     Alien(int c, pthread_mutex_t m, int r) : Entity(c, m, r) {
-//        std::fill_n(hotelBookings, ALL_ALIENS_COUNT, -1);
     }
 
     void main() override {
@@ -386,7 +385,7 @@ public:
         while (true) {
             debug("Looking for hotel.");
             this->randomSleep();
-            this->sendHotelRequest(getRandomHotelId());
+            this->sendHotelRequest(Alien::getRandomHotelId());
             bool canEnterHotel = checkIfCanEnterHotel(false);
             if (!canEnterHotel) {
                 this->enterHotelCond.wait(lck);
@@ -433,36 +432,34 @@ int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    if (rank == 0) {
-        // Print configuration
-        int world_size;
+    // Print configuration
+    int world_size;
 
-        MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-        printf("Purple aliens: %d\n", PURPLES_COUNT);
-        printf("Blue aliens: %d\n", BLUES_COUNT);
-        printf("Hotels: %d\n", HOTELS_NUMBER);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    printf("Purple aliens: %d\n", PURPLES_COUNT);
+    printf("Blue aliens: %d\n", BLUES_COUNT);
+    printf("Hotels: %d\n", HOTELS_NUMBER);
 
-        printf("Number of processes running: %d\n\n", world_size);
-        if (world_size != ALL_ALIENS_COUNT) {
-            printf("Wrong processes amount.\n");
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        if (PURPLES_COUNT <= 0 || BLUES_COUNT <= 0 || HOTELS_NUMBER <= 0) {
-            printf("There has to be at least one of every process type and hotels.\n");
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
+    printf("Number of processes running: %d\n\n", world_size);
+    if (world_size != ALL_ALIENS_COUNT) {
+        printf("Wrong processes amount.\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    if (PURPLES_COUNT <= 0 || BLUES_COUNT <= 0 || HOTELS_NUMBER <= 0) {
+        printf("There has to be at least one of every process type and hotels.\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
-    Entity *entity;
+    Alien *alien;
     if (rank >= FIRST_ID && rank <= LAST_ID) {
-        entity = new Alien(clock, clockMutex, rank);
+        alien = new Alien(clock, clockMutex, rank);
     } else {
         printf("Wrong alienId: %d\n", rank);
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
     pthread_t thd;
-    pthread_create(&thd, nullptr, &Entity::runComm, entity);
-    entity->main();
+    pthread_create(&thd, nullptr, &Entity::runComm, alien);
+    alien->main();
 
     MPI_Finalize();
 }
