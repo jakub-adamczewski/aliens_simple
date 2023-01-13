@@ -29,7 +29,7 @@ const int HOTEL_CAPACITIES[] = {1, 2};
 
 const int HOTELS_NUMBER = sizeof(HOTEL_CAPACITIES) / sizeof(int);
 
-#define MIN_SLEEP 1
+#define MIN_SLEEP 2
 #define MAX_SLEEP 4
 
 enum AlienType {
@@ -381,7 +381,7 @@ public:
     }
 
     void main() override {
-        std::unique_lock<std::mutex> lck(this->canEnterPickedHotel);
+        std::unique_lock <std::mutex> lck(this->canEnterPickedHotel);
         while (true) {
             debug("Looking for hotel.");
             this->randomSleep();
@@ -415,6 +415,7 @@ public:
                     break;
                 case HOTEL_REQUEST_RESP:
                     debug("Got HOTEL_REQUEST_RESP");
+                    addHotelResponse(msg);
                     break;
             }
             if (processStatus == WAITING_TO_ENTER_HOTEL) {
