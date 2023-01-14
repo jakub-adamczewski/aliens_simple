@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <string>
+#include <assert.h>
 
 // Params to define
 #define PURPLES_COUNT 2
@@ -204,19 +205,16 @@ class Alien : public Entity {
         return randIntInclusive(0, HOTELS_NUMBER - 1);
     }
 
-    void sendHotelRequest(int pickedHotelId) {
-        int clk = this->incrementAndGetClock();
+    void sendHotelRequests(int pickedHotelId) {
         struct packet msg =
                 {
-                        clk,
+                        this->incrementAndGetClock(),
                         this->rank,
                         pickedHotelId
                 };
-        sendMsgToAllOtherAliens(msg, HOTEL_REQUEST);
-
         myHotelRequest = msg;
         processStatus = WAITING_TO_ENTER_HOTEL;
-
+        sendMsgToAllOtherAliens(msg, HOTEL_REQUEST);
         debug("Sent requests for hotel %d.", pickedHotelId);
     }
 
@@ -264,20 +262,20 @@ class Alien : public Entity {
         Entity::threadSleep(r);
     }
 
-    void removeOldAndAddNewRequest(struct packet msg) {
+    void removeOldAndAddNewRequest(struct packet newMsg) {
         pthread_mutex_lock(&this->msgVectorsMutex);
 
         hotelRequests.erase(
                 std::remove_if(
                         hotelRequests.begin(),
                         hotelRequests.end(),
-                        [msg](const past_request saved) { return saved.msg.alienId == msg.alienId; }
+                        [newMsg](const past_request saved) { return saved.msg.alienId == newMsg.alienId; }
                 ),
                 hotelRequests.end()
         );
 
         struct past_request req = {
-                msg,
+                newMsg,
                 false
         };
         this->hotelRequests.push_back(req);
@@ -291,28 +289,37 @@ class Alien : public Entity {
                 this->hotelRequests.begin(),
                 this->hotelRequests.end(),
                 [](const struct past_request &a, const struct past_request &b) {
-                    return a.msg.clock < b.msg.clock;
+                    return a.msg.clock < b.msg.clock ||
+                           (a.msg.clock == b.msg.clock && a.msg.alienId < b.msg.alienId);
                 }
         );
     }
 
     void markThatAlienLeftHotel(packet release_msg) {
         pthread_mutex_lock(&this->msgVectorsMutex);
+        int numOfRequestsForAlien = 0;
         for (auto &hotelRequest: hotelRequests) {
             if (hotelRequest.msg.alienId == release_msg.alienId &&
                 hotelRequest.msg.hotelId == release_msg.hotelId) {
                 hotelRequest.leftHotel = true;
+                numOfRequestsForAlien++;
             }
         }
+        assert(numOfRequestsForAlien <= 1);
         pthread_mutex_unlock(&this->msgVectorsMutex);
     }
 
     bool checkIfCanEnterHotel(bool notifyCond = true) {
-
+        assert(myHotelRequest.clock != -1);
+        assert(processStatus == WAITING_TO_ENTER_HOTEL);
+        // not in front of me, means:
+        // - behind me
+        // - not to my hotel
+        // - left mine hotel
         int myFractionAliensInFrontOfMe = 0;
-        int myFractionAliensBehindMeOrNotToMyHotelOrLeftHotel = 0;
+        int myFractionAliensNotInFrontOfMe = 0;
         int otherFractionAliensInFrontOfMe = 0;
-        int otherFractionAliensBehindMeOrNotToMyHotelOrLeftHotel = 0;
+        int otherFractionAliensNotInFrontOfMe = 0;
 
         pthread_mutex_lock(&this->msgVectorsMutex);
 
@@ -327,13 +334,13 @@ class Alien : public Entity {
                 if (isRequestOlderThanMine && isRequestForSameHotel && isAlienStillInHotel) {
                     myFractionAliensInFrontOfMe++;
                 } else {
-                    myFractionAliensBehindMeOrNotToMyHotelOrLeftHotel++;
+                    myFractionAliensNotInFrontOfMe++;
                 }
             } else {
                 if (isRequestOlderThanMine && isRequestForSameHotel && isAlienStillInHotel) {
                     otherFractionAliensInFrontOfMe++;
                 } else {
-                    otherFractionAliensBehindMeOrNotToMyHotelOrLeftHotel++;
+                    otherFractionAliensNotInFrontOfMe++;
                 }
             }
         }
@@ -343,7 +350,7 @@ class Alien : public Entity {
 
         bool noOtherFractionAliensInFrontOfMe = otherFractionAliensInFrontOfMe == 0;
         bool weHaveInfoAboutAllOtherFractionAliens =
-                (otherFractionAliensInFrontOfMe + otherFractionAliensBehindMeOrNotToMyHotelOrLeftHotel) ==
+                (otherFractionAliensInFrontOfMe + otherFractionAliensNotInFrontOfMe) ==
                 Alien::getFractionCount(Alien::getOtherFraction(alienType));
         bool isAnyPlaceForMeInHotel = myFractionAliensInFrontOfMe + 1 <= HOTEL_CAPACITIES[myHotelRequest.hotelId];
         bool gotAllAck = getAckCounter() == ALL_ALIENS_COUNT - 1;
@@ -368,7 +375,7 @@ public:
         while (true) {
             debug("Looking for hotel.");
             this->randomSleep();
-            this->sendHotelRequest(Alien::getRandomHotelId());
+            this->sendHotelRequests(Alien::getRandomHotelId());
             bool canEnterHotel = checkIfCanEnterHotel(false);
             if (!canEnterHotel) {
                 this->enterHotelCond.wait(lck);
@@ -386,16 +393,17 @@ public:
             updateAndIncrementClock(msg.clock);
             switch ((MessageType) status.MPI_TAG) {
                 case HOTEL_REQUEST:
-                    debug("Got HOTEL_REQUEST");
+                    debug("Got HOTEL_REQUEST from %d", msg.alienId);
                     sendHotelAck(msg.alienId);
                     removeOldAndAddNewRequest(msg);
                     break;
                 case HOTEL_RELEASE:
-                    debug("Got HOTEL_RELEASE");
+                    debug("Got HOTEL_RELEASE from %d", msg.alienId);
                     markThatAlienLeftHotel(msg);
                     break;
                 case HOTEL_REQUEST_ACK:
-                    debug("Got HOTEL_REQUEST_ACK");
+                    debug("Got HOTEL_REQUEST_ACK from %d", msg.alienId);
+                    assert(processStatus == WAITING_TO_ENTER_HOTEL);
                     incrementAckCounter();
                     break;
             }
@@ -407,10 +415,10 @@ public:
 };
 
 void check_thread_support(int provided) {
-    printf("THREAD SUPPORT: chcemy %d. Co otrzymamy?\n", provided);
+//    printf("THREAD SUPPORT: chcemy %d. Co otrzymamy?\n", provided);
     switch (provided) {
         case MPI_THREAD_SINGLE:
-            printf("Brak wsparcia dla wątków, kończę\n");
+//            printf("Brak wsparcia dla wątków, kończę\n");
             /* Nie ma co, trzeba wychodzić */
             fprintf(stderr, "Brak wystarczającego wsparcia dla wątków - wychodzę!\n");
             MPI_Finalize();
@@ -437,28 +445,28 @@ int main(int argc, char **argv) {
     int rank;
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
-    check_thread_support(provided);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    // Print configuration
-    int world_size;
-
     if (rank == 0) {
+        // Print configuration
+        check_thread_support(provided);
+        int world_size;
         MPI_Comm_size(MPI_COMM_WORLD, &world_size);
         printf("Purple aliens: %d\n", PURPLES_COUNT);
         printf("Blue aliens: %d\n", BLUES_COUNT);
         printf("Hotels: %d\n", HOTELS_NUMBER);
 
         printf("Number of processes running: %d\n\n", world_size);
-    }
 
-    if (world_size != ALL_ALIENS_COUNT) {
-        printf("Wrong processes amount.\n");
-        MPI_Abort(MPI_COMM_WORLD, 1);
-    }
-    if (PURPLES_COUNT <= 0 || BLUES_COUNT <= 0 || HOTELS_NUMBER <= 0) {
-        printf("There has to be at least one of every process type and hotels.\n");
-        MPI_Abort(MPI_COMM_WORLD, 1);
+        if (world_size != ALL_ALIENS_COUNT) {
+            printf("Wrong processes amount %d.\n", world_size);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+
+        if (PURPLES_COUNT <= 0 || BLUES_COUNT <= 0 || HOTELS_NUMBER <= 0) {
+            printf("There has to be at least one of every process type and hotels.\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
     }
 
     Alien *alien;
