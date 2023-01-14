@@ -116,16 +116,10 @@ public:
         return clock_value;
     }
 
-    int updateAndIncrementClock(int c) {
+    void updateClock(int c) {
         pthread_mutex_lock(&this->clock_mutex);
-        if (c > this->clock) {
-            this->clock = c + 1;
-        } else {
-            this->clock += 1;
-        }
-        c = this->clock;
+        this->clock = std::max(this->clock, c) + 1;
         pthread_mutex_unlock(&this->clock_mutex);
-        return c;
     }
 
     static void *runComm(void *e) {
@@ -299,13 +293,12 @@ class Alien : public Entity {
         pthread_mutex_lock(&this->msgVectorsMutex);
         int numOfRequestsForAlien = 0;
         for (auto &hotelRequest: hotelRequests) {
-            if (hotelRequest.msg.alienId == release_msg.alienId &&
-                hotelRequest.msg.hotelId == release_msg.hotelId) {
+            if (hotelRequest.msg.alienId == release_msg.alienId) {
                 hotelRequest.leftHotel = true;
                 numOfRequestsForAlien++;
             }
         }
-        assert(numOfRequestsForAlien <= 1);
+        assert(numOfRequestsForAlien == 1); // check if it is ok
         pthread_mutex_unlock(&this->msgVectorsMutex);
     }
 
@@ -361,7 +354,22 @@ class Alien : public Entity {
                         gotAllAck;
 
         if (canEnter && notifyCond) {
+            debug(
+                    "Can enter hotel noOtherFractionAliensInFrontOfMe %d, weHaveInfoAboutAllOtherFractionAliens %d, isAnyPlaceForMeInHotel %d, gotAllAck %d",
+                    noOtherFractionAliensInFrontOfMe,
+                    weHaveInfoAboutAllOtherFractionAliens,
+                    isAnyPlaceForMeInHotel,
+                    gotAllAck
+            );
             this->enterHotelCond.notify_all();
+        } else {
+            debug(
+                    "Can not enter hotel noOtherFractionAliensInFrontOfMe %d, weHaveInfoAboutAllOtherFractionAliens %d, isAnyPlaceForMeInHotel %d, gotAllAck %d",
+                    noOtherFractionAliensInFrontOfMe,
+                    weHaveInfoAboutAllOtherFractionAliens,
+                    isAnyPlaceForMeInHotel,
+                    gotAllAck
+            );
         }
         return canEnter;
     }
@@ -390,19 +398,20 @@ public:
         while (true) {
             MPI_Recv(&msg, sizeof(msg), MPI_BYTE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 
-            updateAndIncrementClock(msg.clock);
+            updateClock(msg.clock);
             switch ((MessageType) status.MPI_TAG) {
                 case HOTEL_REQUEST:
-                    debug("Got HOTEL_REQUEST from %d", msg.alienId);
+                    debug("Got HOTEL_REQUEST from alien %d for hotel %d with clk %d", msg.alienId, msg.hotelId,
+                          msg.clock);
                     sendHotelAck(msg.alienId);
                     removeOldAndAddNewRequest(msg);
                     break;
                 case HOTEL_RELEASE:
-                    debug("Got HOTEL_RELEASE from %d", msg.alienId);
+                    debug("Got HOTEL_RELEASE from alien %d with clk %d", msg.alienId, msg.clock);
                     markThatAlienLeftHotel(msg);
                     break;
                 case HOTEL_REQUEST_ACK:
-                    debug("Got HOTEL_REQUEST_ACK from %d", msg.alienId);
+                    debug("Got HOTEL_REQUEST_ACK from alien %d with clk %d", msg.alienId, msg.clock);
                     assert(processStatus == WAITING_TO_ENTER_HOTEL);
                     incrementAckCounter();
                     break;
