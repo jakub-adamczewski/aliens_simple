@@ -134,15 +134,6 @@ public:
         return c;
     }
 
-    int updateClock(int c) {
-        pthread_mutex_lock(&this->clock_mutex);
-        if (c > this->clock) {
-            this->clock = c;
-        }
-        pthread_mutex_unlock(&this->clock_mutex);
-        return c;
-    }
-
     static void *runComm(void *e) {
         ((Entity *) e)->communication();
         return nullptr;
@@ -400,7 +391,7 @@ public:
         while (true) {
             MPI_Recv(&msg, sizeof(msg), MPI_BYTE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 
-            updateClock(msg.clock);
+            updateAndIncrementClock(msg.clock);
             switch ((MessageType) status.MPI_TAG) {
                 case HOTEL_REQUEST:
                     debug("Got HOTEL_REQUEST");
