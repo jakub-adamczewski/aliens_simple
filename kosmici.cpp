@@ -29,8 +29,8 @@ const int HOTEL_CAPACITIES[] = {1, 2};
 
 const int HOTELS_NUMBER = sizeof(HOTEL_CAPACITIES) / sizeof(int);
 
-#define MIN_SLEEP 2
-#define MAX_SLEEP 4
+#define MIN_SLEEP 1
+#define MAX_SLEEP 3
 
 enum AlienType {
     PURPLE,
@@ -111,13 +111,6 @@ public:
     int incrementAndGetClock() {
         pthread_mutex_lock(&this->clock_mutex);
         int clock_value = ++this->clock;
-        pthread_mutex_unlock(&this->clock_mutex);
-        return clock_value;
-    }
-
-    int getClock() {
-        pthread_mutex_lock(&this->clock_mutex);
-        int clock_value = this->clock;
         pthread_mutex_unlock(&this->clock_mutex);
         return clock_value;
     }
@@ -413,23 +406,52 @@ public:
     }
 };
 
+void check_thread_support(int provided) {
+    printf("THREAD SUPPORT: chcemy %d. Co otrzymamy?\n", provided);
+    switch (provided) {
+        case MPI_THREAD_SINGLE:
+            printf("Brak wsparcia dla wątków, kończę\n");
+            /* Nie ma co, trzeba wychodzić */
+            fprintf(stderr, "Brak wystarczającego wsparcia dla wątków - wychodzę!\n");
+            MPI_Finalize();
+            exit(-1);
+            break;
+        case MPI_THREAD_FUNNELED:
+            printf("tylko te wątki, ktore wykonaly mpi_init_thread mogą wykonać wołania do biblioteki mpi\n");
+            break;
+        case MPI_THREAD_SERIALIZED:
+            /* Potrzebne zamki wokół wywołań biblioteki MPI */
+            printf("tylko jeden watek naraz może wykonać wołania do biblioteki MPI\n");
+            break;
+        case MPI_THREAD_MULTIPLE:
+            printf("Pełne wsparcie dla wątków\n"); /* tego chcemy. Wszystkie inne powodują problemy */
+            break;
+        default:
+            printf("Nikt nic nie wie\n");
+    }
+}
 
 int main(int argc, char **argv) {
     int clock = 0;
     pthread_mutex_t clockMutex = PTHREAD_MUTEX_INITIALIZER;
     int rank;
-    MPI_Init(&argc, &argv);
+    int provided;
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
+    check_thread_support(provided);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     // Print configuration
     int world_size;
 
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-    printf("Purple aliens: %d\n", PURPLES_COUNT);
-    printf("Blue aliens: %d\n", BLUES_COUNT);
-    printf("Hotels: %d\n", HOTELS_NUMBER);
+    if (rank == 0) {
+        MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+        printf("Purple aliens: %d\n", PURPLES_COUNT);
+        printf("Blue aliens: %d\n", BLUES_COUNT);
+        printf("Hotels: %d\n", HOTELS_NUMBER);
 
-    printf("Number of processes running: %d\n\n", world_size);
+        printf("Number of processes running: %d\n\n", world_size);
+    }
+
     if (world_size != ALL_ALIENS_COUNT) {
         printf("Wrong processes amount.\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
