@@ -39,7 +39,7 @@ enum AlienType {
 
 enum MessageType {
     HOTEL_REQUEST,
-    HOTEL_REQUEST_RESP, // sent only when alien has not been in any hotel yet
+    HOTEL_REQUEST_ACK, // sent only when alien has not been in any hotel yet
     HOTEL_RELEASE
 };
 
@@ -151,9 +151,9 @@ class Alien : public Entity {
     std::mutex canEnterPickedHotel;
     pthread_mutex_t msgVectorsMutex = PTHREAD_MUTEX_INITIALIZER;
     std::vector<struct past_request> hotelRequests;
-    std::vector<struct packet> hotelResponses;
     ProcessStatus processStatus = NO_HOTEL;
-    bool notPickedAnyHotelYet = true;
+    pthread_mutex_t counterMutex = PTHREAD_MUTEX_INITIALIZER;
+    int ackCounter = 0;
 
     struct packet myHotelRequest;
 
@@ -163,6 +163,26 @@ class Alien : public Entity {
         } else if (alienId >= BLUES_FIRST_ID && alienId <= BLUES_LAST_ID) {
             return BLUE;
         }
+    }
+
+    void incrementAckCounter() {
+        pthread_mutex_lock(&this->counterMutex);
+        ackCounter++;
+        pthread_mutex_unlock(&this->counterMutex);
+    }
+
+    void resetAckCounter() {
+        pthread_mutex_lock(&this->counterMutex);
+        ackCounter = 0;
+        pthread_mutex_unlock(&this->counterMutex);
+    }
+
+    int getAckCounter() {
+        int c;
+        pthread_mutex_lock(&this->counterMutex);
+        c = ackCounter;
+        pthread_mutex_unlock(&this->counterMutex);
+        return c;
     }
 
     static AlienType getOtherFraction(AlienType tp) {
@@ -203,23 +223,22 @@ class Alien : public Entity {
 
         myHotelRequest = msg;
         processStatus = WAITING_TO_ENTER_HOTEL;
-        notPickedAnyHotelYet = false;
 
         debug("Sent requests for hotel %d.", pickedHotelId);
     }
 
-    void sendHotelResponse(int alienTo) {
+    void sendHotelAck(int alienTo) {
         struct packet msg =
                 {
                         incrementAndGetClock(),
                         this->rank
                 };
-        MPI_Send(&msg, sizeof(msg), MPI_BYTE, alienTo, HOTEL_REQUEST_RESP, MPI_COMM_WORLD);
+        MPI_Send(&msg, sizeof(msg), MPI_BYTE, alienTo, HOTEL_REQUEST_ACK, MPI_COMM_WORLD);
     }
 
     void enterHotelForRandomTime() {
         processStatus = IN_HOTEL;
-        debug("E%d.marker", myHotelRequest.hotelId) // entered hotel %d
+        debug("E%d.marker", myHotelRequest.hotelId); // entered hotel %d
         this->randomSleep();
 
         processStatus = NO_HOTEL;
@@ -236,6 +255,7 @@ class Alien : public Entity {
                 -1, -1, -1
         };
         myHotelRequest = emptyMsg;
+        resetAckCounter();
     }
 
     void sendMsgToAllOtherAliens(struct packet msg, MessageType msgType) {
@@ -251,7 +271,7 @@ class Alien : public Entity {
         Entity::threadSleep(r);
     }
 
-    void removeOldAlienMessagesAndAddNewHotelRequest(struct packet msg) {
+    void removeOldAndAddNewRequest(struct packet msg) {
         pthread_mutex_lock(&this->msgVectorsMutex);
 
         hotelRequests.erase(
@@ -261,14 +281,6 @@ class Alien : public Entity {
                         [msg](const past_request saved) { return saved.msg.alienId == msg.alienId; }
                 ),
                 hotelRequests.end()
-        );
-        hotelResponses.erase(
-                std::remove_if(
-                        hotelResponses.begin(),
-                        hotelResponses.end(),
-                        [msg](const packet saved) { return saved.alienId == msg.alienId; }
-                ),
-                hotelResponses.end()
         );
 
         struct past_request req = {
@@ -291,12 +303,6 @@ class Alien : public Entity {
         );
     }
 
-    void addHotelResponse(struct packet msg) {
-        pthread_mutex_lock(&this->msgVectorsMutex);
-        this->hotelResponses.push_back(msg);
-        pthread_mutex_unlock(&this->msgVectorsMutex);
-    }
-
     void markThatAlienLeftHotel(packet release_msg) {
         pthread_mutex_lock(&this->msgVectorsMutex);
         for (auto &hotelRequest: hotelRequests) {
@@ -311,9 +317,9 @@ class Alien : public Entity {
     bool checkIfCanEnterHotel(bool notifyCond = true) {
 
         int myFractionAliensInFrontOfMe = 0;
-        int myFractionAliensBehindMeOrNotToMyHotel = 0;
+        int myFractionAliensBehindMeOrNotToMyHotelOrLeftHotel = 0;
         int otherFractionAliensInFrontOfMe = 0;
-        int otherFractionAliensBehindMeOrNotToMyHotel = 0;
+        int otherFractionAliensBehindMeOrNotToMyHotelOrLeftHotel = 0;
 
         pthread_mutex_lock(&this->msgVectorsMutex);
 
@@ -328,23 +334,14 @@ class Alien : public Entity {
                 if (isRequestOlderThanMine && isRequestForSameHotel && isAlienStillInHotel) {
                     myFractionAliensInFrontOfMe++;
                 } else {
-                    myFractionAliensBehindMeOrNotToMyHotel++;
+                    myFractionAliensBehindMeOrNotToMyHotelOrLeftHotel++;
                 }
             } else {
                 if (isRequestOlderThanMine && isRequestForSameHotel && isAlienStillInHotel) {
                     otherFractionAliensInFrontOfMe++;
                 } else {
-                    otherFractionAliensBehindMeOrNotToMyHotel++;
+                    otherFractionAliensBehindMeOrNotToMyHotelOrLeftHotel++;
                 }
-            }
-        }
-
-        for (auto response: hotelResponses) {
-            bool isRequestFromMyFraction = Alien::getAlienType(response.alienId) == this->alienType;
-            if (isRequestFromMyFraction) {
-                myFractionAliensBehindMeOrNotToMyHotel++;
-            } else {
-                otherFractionAliensBehindMeOrNotToMyHotel++;
             }
         }
 
@@ -353,13 +350,15 @@ class Alien : public Entity {
 
         bool noOtherFractionAliensInFrontOfMe = otherFractionAliensInFrontOfMe == 0;
         bool weHaveInfoAboutAllOtherFractionAliens =
-                (otherFractionAliensInFrontOfMe + otherFractionAliensBehindMeOrNotToMyHotel) ==
+                (otherFractionAliensInFrontOfMe + otherFractionAliensBehindMeOrNotToMyHotelOrLeftHotel) ==
                 Alien::getFractionCount(Alien::getOtherFraction(alienType));
         bool isAnyPlaceForMeInHotel = myFractionAliensInFrontOfMe + 1 <= HOTEL_CAPACITIES[myHotelRequest.hotelId];
+        bool gotAllAck = getAckCounter() == ALL_ALIENS_COUNT - 1;
 
         bool canEnter = noOtherFractionAliensInFrontOfMe &&
                         weHaveInfoAboutAllOtherFractionAliens &&
-                        isAnyPlaceForMeInHotel;
+                        isAnyPlaceForMeInHotel &&
+                        gotAllAck;
 
         if (canEnter && notifyCond) {
             this->enterHotelCond.notify_all();
@@ -395,18 +394,16 @@ public:
             switch ((MessageType) status.MPI_TAG) {
                 case HOTEL_REQUEST:
                     debug("Got HOTEL_REQUEST");
-                    removeOldAlienMessagesAndAddNewHotelRequest(msg);
-                    if (notPickedAnyHotelYet) {
-                        sendHotelResponse(msg.alienId);
-                    }
+                    sendHotelAck(msg.alienId);
+                    removeOldAndAddNewRequest(msg);
                     break;
                 case HOTEL_RELEASE:
                     debug("Got HOTEL_RELEASE");
                     markThatAlienLeftHotel(msg);
                     break;
-                case HOTEL_REQUEST_RESP:
-                    debug("Got HOTEL_REQUEST_RESP");
-                    addHotelResponse(msg);
+                case HOTEL_REQUEST_ACK:
+                    debug("Got HOTEL_REQUEST_ACK");
+                    incrementAckCounter();
                     break;
             }
             if (processStatus == WAITING_TO_ENTER_HOTEL) {
