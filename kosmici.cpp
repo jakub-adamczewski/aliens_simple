@@ -30,8 +30,8 @@ const int HOTEL_CAPACITIES[] = {1, 2};
 
 const int HOTELS_NUMBER = sizeof(HOTEL_CAPACITIES) / sizeof(HOTEL_CAPACITIES[0]);
 
-#define MIN_SLEEP 1
-#define MAX_SLEEP 3
+#define MIN_SLEEP 2
+#define MAX_SLEEP 4
 
 enum AlienType {
     PURPLE,
@@ -61,7 +61,7 @@ struct past_request {
     bool leftHotel;
 };
 
-#define debug(FORMAT, ...) printf("\033 |c:%d|r:%d|f:%c|s:%s|t:%s|msg:" FORMAT "|\n", this->getClock(), this->rank, toString(this->alienType), toString(this->processStatus),printTime(),##__VA_ARGS__);
+#define debug(FORMAT, ...) printf("\033 |c:%d|r:%d|f:%c|s:%s|t:%s|msg:" FORMAT "|\n", this->getClock(), this->rank, toChar(this->alienType), toString(this->processStatus),printTime(),##__VA_ARGS__);
 
 char *printTime() {
     time_t rawTime;
@@ -85,12 +85,12 @@ static char *toString(ProcessStatus status) {
     }
 }
 
-static char *toString(AlienType status) {
-    switch (status) {
+static char toChar(AlienType tp) {
+    switch (tp) {
         case PURPLE:
-            return "P";
+            return 'P';
         case BLUE:
-            return "B";
+            return 'B';
     }
 }
 
@@ -434,17 +434,16 @@ public:
             updateClocks(msg);
             switch ((MessageType) status.MPI_TAG) {
                 case HOTEL_REQUEST:
-                    debug("Got HOTEL_REQUEST from alien %d for hotel %d with clk %d", msg.alienId, msg.hotelId,
-                          msg.clock);
+                    debug("Got HOTEL_REQUEST: clk %d, alien %d, hotel %d", msg.clock, msg.alienId, msg.hotelId);
                     sendHotelAck(msg.alienId);
                     removeOldAndAddNewRequest(msg);
                     break;
                 case HOTEL_RELEASE:
-                    debug("Got HOTEL_RELEASE from alien %d with clk %d", msg.alienId, msg.clock);
+                    debug("Got HOTEL_RELEASE: clk %d, alien %d", msg.clock, msg.alienId);
                     markThatAlienLeftHotel(msg);
                     break;
                 case HOTEL_REQUEST_ACK:
-                    debug("Got HOTEL_REQUEST_ACK from alien %d with clk %d", msg.alienId, msg.clock);
+                    debug("Got HOTEL_REQUEST_ACK: clk %d, alien %d", msg.clock, msg.alienId);
                     assert(processStatus == WAITING_TO_ENTER_HOTEL);
                     incrementAckCounter();
                     break;
