@@ -28,10 +28,10 @@ const int HOTEL_CAPACITIES[] = {1, 2};
 #define BLUES_LAST_ID LAST_ID
 
 
-const int HOTELS_NUMBER = sizeof(HOTEL_CAPACITIES) / sizeof(HOTEL_CAPACITIES[0]);
+const int HOTELS_NUMBER = sizeof(HOTEL_CAPACITIES) / sizeof(int);
 
-#define MIN_SLEEP 2
-#define MAX_SLEEP 4
+#define MIN_SLEEP 1
+#define MAX_SLEEP 3
 
 enum AlienType {
     PURPLE,
@@ -61,7 +61,7 @@ struct past_request {
     bool leftHotel;
 };
 
-#define debug(FORMAT, ...) printf("\033 |c:%d|r:%d|f:%c|s:%s|t:%s|msg:" FORMAT "|\n", this->getClock(), this->rank, toChar(this->alienType), toString(this->processStatus),printTime(),##__VA_ARGS__);
+#define debug(FORMAT, ...) printf("\033 |c:%d|r:%d|f:%c|s:%s|t:%s|msg:" FORMAT "|\n", this->getClock(), this->rank, (this->alienType == PURPLE ? 'P' : 'B'), toString(this->processStatus),printTime(),##__VA_ARGS__);
 
 char *printTime() {
     time_t rawTime;
@@ -85,74 +85,46 @@ static char *toString(ProcessStatus status) {
     }
 }
 
-static char toChar(AlienType tp) {
-    switch (tp) {
-        case PURPLE:
-            return 'P';
-        case BLUE:
-            return 'B';
-    }
-}
-
 class Entity {
-    int clocks[ALL_ALIENS_COUNT] = {};
-    pthread_mutex_t clocks_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-    void assertProperStartStateOfClocks() {
-        pthread_mutex_lock(&this->clocks_mutex);
-        for (int c: clocks) {
-            assert(c == 0);
-        }
-        pthread_mutex_unlock(&this->clocks_mutex);
-    }
-
-protected:
-    int rank;
-
 public:
+    int clocks[ALL_ALIENS_COUNT] = {};
+    pthread_mutex_t clock_mutex;
+    int rank;
 
     virtual void main() = 0;
 
     virtual void communication() = 0;
 
-    Entity(int r) {
+    Entity(pthread_mutex_t m, int r) {
+        this->clock_mutex = m;
         this->rank = r;
         srand(time(nullptr) + this->rank);
-        assertProperStartStateOfClocks();
-    }
-
-    int getClock() {
-        pthread_mutex_lock(&this->clocks_mutex);
-        int clock_value = this->clocks[rank];
-        pthread_mutex_unlock(&this->clocks_mutex);
-        return clock_value;
+        pthread_mutex_lock(&this->clock_mutex);
+        for (int c: clocks) {
+            assert(c == 0);
+        }
+        pthread_mutex_unlock(&this->clock_mutex);
     }
 
     int incrementAndGetClock() {
-        pthread_mutex_lock(&this->clocks_mutex);
+        pthread_mutex_lock(&this->clock_mutex);
         int clock_value = ++this->clocks[rank];
-        pthread_mutex_unlock(&this->clocks_mutex);
+        pthread_mutex_unlock(&this->clock_mutex);
         return clock_value;
     }
 
-    void updateClocks(packet msg) {
-        pthread_mutex_lock(&this->clocks_mutex);
-        clocks[rank] = std::max(clocks[rank], msg.clock) + 1;
-        clocks[msg.alienId] = msg.clock;
-        pthread_mutex_unlock(&this->clocks_mutex);
+    int getClock() {
+        pthread_mutex_lock(&this->clock_mutex);
+        int clock_value = this->clocks[rank];
+        pthread_mutex_unlock(&this->clock_mutex);
+        return clock_value;
     }
 
-    bool checkIfMyClockIsTheBiggestAndAllClocksInitialized() {
-        pthread_mutex_lock(&this->clocks_mutex);
-        int myClk = clocks[rank];
-        for (int i_rank = 0; i_rank < ALL_ALIENS_COUNT; i_rank++) {
-            int i_clk = clocks[i_rank];
-            if (i_clk == 0) return false;
-            if (i_rank == rank) continue;
-            if (i_clk > myClk || (i_clk == myClk && i_rank > rank)) return false;
-        }
-        pthread_mutex_unlock(&this->clocks_mutex);
-        return true;
+    void updateClock(packet msg) {
+        pthread_mutex_lock(&this->clock_mutex);
+        this->clocks[rank] = std::max(msg.clock, this->clocks[rank]) + 1;
+        clocks[msg.alienId] = msg.clock;
+        pthread_mutex_unlock(&this->clock_mutex);
     }
 
     static void *runComm(void *e) {
@@ -170,11 +142,12 @@ class Alien : public Entity {
     AlienType alienType = Alien::getAlienType(rank);
     std::condition_variable enterHotelCond;
     std::mutex canEnterPickedHotel;
-    pthread_mutex_t hotelRequestsMutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_t msgVectorsMutex = PTHREAD_MUTEX_INITIALIZER;
     std::vector<struct past_request> hotelRequests;
     ProcessStatus processStatus = NO_HOTEL;
     pthread_mutex_t counterMutex = PTHREAD_MUTEX_INITIALIZER;
     int ackCounter = 0;
+
     struct packet myHotelRequest;
 
     static AlienType getAlienType(int alienId) {
@@ -251,6 +224,7 @@ class Alien : public Entity {
                         this->rank
                 };
         MPI_Send(&msg, sizeof(msg), MPI_BYTE, alienTo, HOTEL_REQUEST_ACK, MPI_COMM_WORLD);
+        debug("Sent ACK");
     }
 
     void enterHotelForRandomTime() {
@@ -289,7 +263,7 @@ class Alien : public Entity {
     }
 
     void removeOldAndAddNewRequest(struct packet newMsg) {
-        pthread_mutex_lock(&this->hotelRequestsMutex);
+        pthread_mutex_lock(&this->msgVectorsMutex);
 
         hotelRequests.erase(
                 std::remove_if(
@@ -307,7 +281,7 @@ class Alien : public Entity {
         this->hotelRequests.push_back(req);
         this->sortHotelRequestsWithoutMutex();
 
-        pthread_mutex_unlock(&this->hotelRequestsMutex);
+        pthread_mutex_unlock(&this->msgVectorsMutex);
     }
 
     void sortHotelRequestsWithoutMutex() {
@@ -322,20 +296,29 @@ class Alien : public Entity {
     }
 
     void markThatAlienLeftHotel(packet release_msg) {
-        pthread_mutex_lock(&this->hotelRequestsMutex);
-        int edited = 0;
+        pthread_mutex_lock(&this->msgVectorsMutex);
+        int numOfRequestsForAlien = 0;
         for (auto &hotelRequest: hotelRequests) {
             if (hotelRequest.msg.alienId == release_msg.alienId) {
                 hotelRequest.leftHotel = true;
-                edited++;
+                numOfRequestsForAlien++;
             }
         }
-        assert(edited == 1);
-        pthread_mutex_unlock(&this->hotelRequestsMutex);
+        assert(numOfRequestsForAlien == 1); // check if it is ok
+        pthread_mutex_unlock(&this->msgVectorsMutex);
     }
 
-    static bool packetsCompare(const struct packet a, const struct packet b) {
-        return a.clock < b.clock || (a.clock == b.clock && a.alienId < b.alienId);
+    bool checkIfMyClockIsTheBiggestAndAllClocksInitialized() {
+        pthread_mutex_lock(&this->clock_mutex);
+        int myClk = clocks[rank];
+        for (int i_rank = 0; i_rank < ALL_ALIENS_COUNT; i_rank++) {
+            int i_clk = clocks[i_rank];
+            if (i_clk == 0) return false;
+            if (i_rank == rank) continue;
+            if (i_clk > myClk || (i_clk == myClk && i_rank > rank)) return false;
+        }
+        pthread_mutex_unlock(&this->clock_mutex);
+        return true;
     }
 
     bool checkIfCanEnterHotel(bool notifyCond = true) {
@@ -346,21 +329,26 @@ class Alien : public Entity {
         // - not to my hotel
         // - left mine hotel
         int myFractionAliensInFrontOfMe = 0;
+        int myFractionAliensNotInFrontOfMe = 0;
         int otherFractionAliensInFrontOfMe = 0;
         int otherFractionAliensNotInFrontOfMe = 0;
 
-        pthread_mutex_lock(&this->hotelRequestsMutex);
+        pthread_mutex_lock(&this->msgVectorsMutex);
 
         for (auto pastRequest: hotelRequests) {
 
             bool isRequestFromMyFraction = Alien::getAlienType(pastRequest.msg.alienId) == this->alienType;
-            bool isRequestOlderThanMine = Alien::packetsCompare(pastRequest.msg, myHotelRequest);
+            bool isRequestOlderThanMine = pastRequest.msg.clock < this->myHotelRequest.clock ||
+                                          (pastRequest.msg.clock == this->myHotelRequest.clock &&
+                                           pastRequest.msg.alienId < this->myHotelRequest.alienId);
             bool isRequestForSameHotel = pastRequest.msg.hotelId == myHotelRequest.hotelId;
             bool isAlienStillInHotel = !pastRequest.leftHotel;
 
             if (isRequestFromMyFraction) {
                 if (isRequestOlderThanMine && isRequestForSameHotel && isAlienStillInHotel) {
                     myFractionAliensInFrontOfMe++;
+                } else {
+                    myFractionAliensNotInFrontOfMe++;
                 }
             } else {
                 if (isRequestOlderThanMine && isRequestForSameHotel && isAlienStillInHotel) {
@@ -371,7 +359,8 @@ class Alien : public Entity {
             }
         }
 
-        pthread_mutex_unlock(&this->hotelRequestsMutex);
+        pthread_mutex_unlock(&this->msgVectorsMutex);
+
 
         bool noOtherFractionAliensInFrontOfMe = otherFractionAliensInFrontOfMe == 0;
         bool weHaveInfoAboutAllOtherFractionAliens =
@@ -379,37 +368,21 @@ class Alien : public Entity {
                 Alien::getFractionCount(Alien::getOtherFraction(alienType));
         bool isAnyPlaceForMeInHotel = myFractionAliensInFrontOfMe + 1 <= HOTEL_CAPACITIES[myHotelRequest.hotelId];
         bool gotAllAck = getAckCounter() == ALL_ALIENS_COUNT - 1;
-        bool isClocksStateCorrect = checkIfMyClockIsTheBiggestAndAllClocksInitialized();
 
         bool canEnter = noOtherFractionAliensInFrontOfMe &&
                         weHaveInfoAboutAllOtherFractionAliens &&
                         isAnyPlaceForMeInHotel &&
                         gotAllAck &&
-                        isClocksStateCorrect;
+                        checkIfMyClockIsTheBiggestAndAllClocksInitialized();
 
         if (canEnter && notifyCond) {
-            debug(
-                    "Can enter hotel noOtherFractionAliensInFrontOfMe %d, weHaveInfoAboutAllOtherFractionAliens %d, isAnyPlaceForMeInHotel %d, gotAllAck %d",
-                    noOtherFractionAliensInFrontOfMe,
-                    weHaveInfoAboutAllOtherFractionAliens,
-                    isAnyPlaceForMeInHotel,
-                    gotAllAck
-            );
             this->enterHotelCond.notify_all();
-        } else {
-            debug(
-                    "Can not enter hotel noOtherFractionAliensInFrontOfMe %d, weHaveInfoAboutAllOtherFractionAliens %d, isAnyPlaceForMeInHotel %d, gotAllAck %d",
-                    noOtherFractionAliensInFrontOfMe,
-                    weHaveInfoAboutAllOtherFractionAliens,
-                    isAnyPlaceForMeInHotel,
-                    gotAllAck
-            );
         }
         return canEnter;
     }
 
 public:
-    Alien(int r) : Entity(r) {}
+    Alien(pthread_mutex_t m, int r) : Entity(m, r) {}
 
     void main() override {
         std::unique_lock <std::mutex> lck(this->canEnterPickedHotel);
@@ -431,19 +404,20 @@ public:
         while (true) {
             MPI_Recv(&msg, sizeof(msg), MPI_BYTE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 
-            updateClocks(msg);
+            updateClock(msg);
             switch ((MessageType) status.MPI_TAG) {
                 case HOTEL_REQUEST:
-                    debug("Got HOTEL_REQUEST: clk %d, alien %d, hotel %d", msg.clock, msg.alienId, msg.hotelId);
+                    debug("Got HOTEL_REQUEST from alien %d for hotel %d with clk %d", msg.alienId, msg.hotelId,
+                          msg.clock);
                     sendHotelAck(msg.alienId);
                     removeOldAndAddNewRequest(msg);
                     break;
                 case HOTEL_RELEASE:
-                    debug("Got HOTEL_RELEASE: clk %d, alien %d", msg.clock, msg.alienId);
+                    debug("Got HOTEL_RELEASE from alien %d with clk %d", msg.alienId, msg.clock);
                     markThatAlienLeftHotel(msg);
                     break;
                 case HOTEL_REQUEST_ACK:
-                    debug("Got HOTEL_REQUEST_ACK: clk %d, alien %d", msg.clock, msg.alienId);
+                    debug("Got HOTEL_REQUEST_ACK from alien %d with clk %d", msg.alienId, msg.clock);
                     assert(processStatus == WAITING_TO_ENTER_HOTEL);
                     incrementAckCounter();
                     break;
@@ -481,6 +455,7 @@ void check_thread_support(int provided) {
 }
 
 int main(int argc, char **argv) {
+    pthread_mutex_t clockMutex = PTHREAD_MUTEX_INITIALIZER;
     int rank;
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
@@ -510,7 +485,7 @@ int main(int argc, char **argv) {
 
     Alien *alien;
     if (rank >= FIRST_ID && rank <= LAST_ID) {
-        alien = new Alien(rank);
+        alien = new Alien(clockMutex, rank);
     } else {
         printf("Wrong alienId: %d\n", rank);
         MPI_Abort(MPI_COMM_WORLD, 1);
