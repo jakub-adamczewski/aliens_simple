@@ -30,8 +30,8 @@ const int HOTEL_CAPACITIES[] = {1, 2};
 
 const int HOTELS_NUMBER = sizeof(HOTEL_CAPACITIES) / sizeof(int);
 
-#define MIN_SLEEP 1
-#define MAX_SLEEP 3
+#define MIN_SLEEP 5
+#define MAX_SLEEP 7
 
 enum AlienType {
     PURPLE,
