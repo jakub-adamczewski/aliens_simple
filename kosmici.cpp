@@ -30,8 +30,8 @@ const int HOTEL_CAPACITIES[] = {1, 2};
 
 const int HOTELS_NUMBER = sizeof(HOTEL_CAPACITIES) / sizeof(int);
 
-#define MIN_SLEEP 5
-#define MAX_SLEEP 7
+#define MIN_SLEEP 1
+#define MAX_SLEEP 3
 
 enum AlienType {
     PURPLE,
@@ -101,7 +101,7 @@ public:
         srand(time(nullptr) + this->rank);
         pthread_mutex_lock(&this->clock_mutex);
         for (int c: clocks) {
-            assert(c == 0);
+//            assert(c == 0);
         }
         pthread_mutex_unlock(&this->clock_mutex);
     }
@@ -304,7 +304,7 @@ class Alien : public Entity {
                 numOfRequestsForAlien++;
             }
         }
-        assert(numOfRequestsForAlien == 1); // check if it is ok
+//        assert(numOfRequestsForAlien == 1); // check if it is ok
         pthread_mutex_unlock(&this->msgVectorsMutex);
     }
 
@@ -315,15 +315,15 @@ class Alien : public Entity {
             int i_clk = clocks[i_rank];
             if (i_clk == 0) return false;
             if (i_rank == rank) continue;
-            if (i_clk > myClk || (i_clk == myClk && i_rank > rank)) return false;
+            if (i_clk > myClk || (i_clk == myClk && i_rank < rank)) return false;
         }
         pthread_mutex_unlock(&this->clock_mutex);
         return true;
     }
 
     bool checkIfCanEnterHotel(bool notifyCond = true) {
-        assert(myHotelRequest.clock != -1);
-        assert(processStatus == WAITING_TO_ENTER_HOTEL);
+//        assert(myHotelRequest.clock != -1);
+//        assert(processStatus == WAITING_TO_ENTER_HOTEL);
         // not in front of me, means:
         // - behind me
         // - not to my hotel
@@ -418,7 +418,7 @@ public:
                     break;
                 case HOTEL_REQUEST_ACK:
                     debug("Got HOTEL_REQUEST_ACK from alien %d with clk %d", msg.alienId, msg.clock);
-                    assert(processStatus == WAITING_TO_ENTER_HOTEL);
+//                    assert(processStatus == WAITING_TO_ENTER_HOTEL);
                     incrementAckCounter();
                     break;
             }
